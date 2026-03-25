@@ -1,0 +1,44 @@
+# Node
+node_modules/
+npm-debug.log*
+package-lock.json
+
+# Entorno virtual
+venv/
+.venv/
+env/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+
+# API keys y configuración sensible
+.env
+*.env
+secrets.json
+config_local.py
+
+# Caché y datos temporales
+data/_ucl_cache/
+data/playdoit_games_raw.json
+data/playdoit_visible.txt
+
+# Archivos grandes (modelos y parquets)
+data/models/
+data/processed/
+data/*.json
+data/predicciones_*.csv
+data/ligamx_predicciones.csv
+
+# Jupyter
+.ipynb_checkpoints/
+
+# VS Code
+.vscode/
+
+# Windows
+Thumbs.db
+desktop.ini

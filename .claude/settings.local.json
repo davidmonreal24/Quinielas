@@ -1,0 +1,12 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(source venv/Scripts/activate)",
+      "Bash(python test_sofascore.py)",
+      "WebFetch(domain:github.com)",
+      "WebFetch(domain:scraperfc.readthedocs.io)",
+      "WebSearch",
+      "Bash(python collect_sofascore.py --days 15 --history-days 150)"
+    ]
+  }
+}

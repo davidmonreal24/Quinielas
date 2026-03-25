@@ -1,0 +1,23 @@
+# ─────────────────────────────────────────────────────
+# Soccer Data Project — Dependencias
+# Instalar con: pip install -r requirements.txt
+# ─────────────────────────────────────────────────────
+
+# Core de datos
+soccerdata>=1.8.8          # scraper principal
+pandas>=2.0.0              # DataFrames
+numpy>=1.26.0              # operaciones numéricas
+pyarrow>=14.0.0            # guardar en formato Parquet (eficiente para ML)
+
+# Análisis y ML (opcional pero recomendado)
+scikit-learn>=1.4.0        # modelos clásicos (Random Forest, XGBoost wrapper, etc.)
+xgboost>=2.0.0             # modelo de gradiente boosting (muy bueno para este tipo de datos)
+
+# Visualización
+matplotlib>=3.8.0          # gráficas básicas
+seaborn>=0.13.0            # gráficas estadísticas
+mplsoccer>=1.2.0           # visualización de canchas y eventos
+
+# Jupyter (para análisis interactivo)
+jupyterlab>=4.0.0
+ipykernel>=6.0.0

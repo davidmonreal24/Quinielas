@@ -1,0 +1,83 @@
+{
+  "matches": [
+    {
+      "home": "Barcelona",
+      "away": "Newcastle United",
+      "home_formation": "4-3-3",
+      "away_formation": "4-3-3",
+      "home_xi": [
+        "Ter Stegen",
+        "Kounde", "Cubarsí", "Iñigo Martínez", "Balde",
+        "Pedri", "De Jong", "Gavi",
+        "Yamal", "Lewandowski", "Dani Olmo"
+      ],
+      "away_xi": [
+        "Pope",
+        "Trippier", "Schar", "Botman", "Hall",
+        "Guimaraes", "Tonali", "Willock",
+        "Murphy", "Isak", "Gordon"
+      ],
+      "playdoit": {"local": 1.55, "empate": 3.90, "visitante": 5.20}
+    },
+    {
+      "home": "Bayern Munich",
+      "away": "Atalanta",
+      "home_formation": "4-2-3-1",
+      "away_formation": "3-4-2-1",
+      "home_xi": [
+        "Neuer",
+        "Kimmich", "Upamecano", "Kim", "Davies",
+        "Goretzka", "Pavlovic",
+        "Musiala", "Müller", "Gnabry",
+        "Kane"
+      ],
+      "away_xi": [
+        "Carnesecchi",
+        "Djimsiti", "Hien", "Kolasinac",
+        "Bellanova", "de Roon", "Ederson", "Ruggeri",
+        "Pasalic", "Lookman",
+        "Retegui"
+      ],
+      "playdoit": {"local": 1.70, "empate": 3.60, "visitante": 4.80}
+    },
+    {
+      "home": "Liverpool",
+      "away": "Galatasaray",
+      "home_formation": "4-3-3",
+      "away_formation": "4-2-3-1",
+      "home_xi": [
+        "Alisson",
+        "Alexander-Arnold", "Konate", "Van Dijk", "Robertson",
+        "Gravenberch", "Mac Allister", "Jones",
+        "Salah", "Nunez", "Luis Diaz"
+      ],
+      "away_xi": [
+        "Muslera",
+        "Yedlin", "Sanchez", "Bardakci", "Boey",
+        "Torreira", "Demirbay",
+        "Zaha", "Mertens", "Aktürkoğlu",
+        "Icardi"
+      ],
+      "playdoit": {"local": 1.40, "empate": 4.50, "visitante": 7.50}
+    },
+    {
+      "home": "Tottenham Hotspur",
+      "away": "Atletico Madrid",
+      "home_formation": "4-2-3-1",
+      "away_formation": "4-4-2",
+      "home_xi": [
+        "Vicario",
+        "Pedro Porro", "Romero", "Van de Ven", "Udogie",
+        "Bissouma", "Sarr",
+        "Johnson", "Maddison", "Kulusevski",
+        "Son"
+      ],
+      "away_xi": [
+        "Oblak",
+        "Molina", "Witsel", "Le Normand", "Reinildo",
+        "Koke", "Pablo Barrios", "De Paul", "Lino",
+        "Griezmann", "Correa"
+      ]
+    }
+  ]
+}
