@@ -32,6 +32,7 @@ import argparse
 import json
 import math
 import re
+import time
 from datetime import date, datetime, timezone
 from difflib import SequenceMatcher
 from pathlib import Path
@@ -39,6 +40,16 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 import requests  # noqa: F401 — usado en fetch_odds_ligamx
+
+from context_enricher import (
+    dixon_coles_probs,
+    smooth_draw as smooth_draw_dc,
+    build_ligamx_table_context,
+    apply_motivation,
+    scorers_for_team,
+    estimate_corners,
+    match_narrative,
+)
 
 # ─── Constantes ───────────────────────────────────────────────────────────────
 LIGA_MX_ID      = 11620
@@ -68,6 +79,11 @@ ODDS_CACHE_TTL  = 3600   # segundos — re-fetches si el cache tiene más de 1 h
 # Bookmakers de referencia por región (The Odds API)
 # 'eu' incluye: Bet365, Betway, Unibet, William Hill, etc.
 ODDS_REGIONS    = "eu,us2"   # eu=europeos, us2=Pinnacle + DraftKings
+
+# FBref — Corners y Tarjetas (via soccerdata)
+FBREF_CACHE_DIR = DATA_DIR / "_fbref_cache"
+FBREF_CACHE_TTL = 43200   # 12 horas en segundos
+FBREF_SEASON    = "2526"  # temporada actual Liga MX
 
 # Aliases The Odds API → nombre canónico (para fuzzy matching con Sofascore)
 _ODDS_API_ALIASES = {
@@ -307,6 +323,192 @@ def fetch_odds_ligamx(api_key: str) -> dict:
 
     _save_odds_cache(odds_map)
     return odds_map
+
+
+# ─── FBref Liga MX: Corners y Tarjetas ────────────────────────────────────────
+
+def _load_apifootball_liga_mx_cards(seasons: tuple = (2025, 2024)) -> dict:
+    """
+    Obtiene promedios de tarjetas amarillas desde API-Football.
+    Endpoint: GET /teams/statistics?league=262&season={s}&team={id}
+    Retorna: {team_norm: {"avg_yellows": float, "n_games": int}}
+    """
+    from context_enricher import APIFOOTBALL_BASE, APIFOOTBALL_HDR
+
+    for season_id in seasons:
+        try:
+            r = requests.get(
+                f"{APIFOOTBALL_BASE}/teams",
+                headers=APIFOOTBALL_HDR,
+                params={"league": 262, "season": season_id},
+                timeout=10,
+            )
+            if r.status_code != 200:
+                continue
+            teams = r.json().get("response", [])
+            if not teams:
+                continue
+
+            print(f"  API-Football Liga MX {season_id}: {len(teams)} equipos")
+            result: dict = {}
+            for td in teams[:20]:
+                tid   = td["team"]["id"]
+                tname = td["team"]["name"]
+                time.sleep(0.4)
+                sr = requests.get(
+                    f"{APIFOOTBALL_BASE}/teams/statistics",
+                    headers=APIFOOTBALL_HDR,
+                    params={"league": 262, "season": season_id, "team": tid},
+                    timeout=10,
+                )
+                if sr.status_code != 200:
+                    continue
+                ts = sr.json().get("response", {})
+                yellow_data = ts.get("cards", {}).get("yellow", {})
+                total_yellows = sum((v.get("total") or 0) for v in yellow_data.values())
+                games_total = ts.get("fixtures", {}).get("played", {}).get("total", 0) or 1
+                tn = _norm(tname)
+                result[tn] = {
+                    "avg_yellows": round(total_yellows / games_total, 1),
+                    "n_games":     games_total,
+                }
+            if result:
+                print(f"  API-Football: {len(result)} equipos con tarjetas (season {season_id})")
+                return result
+        except Exception as ex:
+            print(f"  API-Football ({season_id}): {ex}")
+    return {}
+
+
+def load_fbref_ligamx_stats(season: str = FBREF_SEASON) -> dict:
+    """
+    Descarga estadísticas históricas de corners y tarjetas para Liga MX.
+
+    Estrategia en cascada:
+      1. FBref via soccerdata — passing_types (CK) y misc (CrdY).
+         Nota: soccerdata solo soporta Big-5; falla para Liga MX y se captura.
+      2. Fallback: API-Football /teams/statistics — tarjetas amarillas por equipo.
+         (Corners: se estiman con att_h-calibration en generate_predictions)
+
+    Retorna: {
+      "nombre_normalizado": {
+        "avg_corners":   float | None,
+        "avg_corners_h": float | None,
+        "avg_corners_a": float | None,
+        "avg_yellows":   float | None,
+        "avg_yellows_h": float | None,
+        "avg_yellows_a": float | None,
+        "n_games":       int,
+      }
+    }
+    """
+    FBREF_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+    cache_file = FBREF_CACHE_DIR / f"ligamx_{season}_stats.json"
+
+    if cache_file.exists():
+        age = datetime.now(tz=timezone.utc).timestamp() - cache_file.stat().st_mtime
+        if age < FBREF_CACHE_TTL:
+            try:
+                data = json.loads(cache_file.read_bytes().decode("utf-8"))
+                if data is not None:
+                    print(f"  Caché stats: {len(data)} equipos")
+                    return data
+            except Exception:
+                pass
+
+    stats: dict = {}
+
+    # ── Intento 1: FBref via soccerdata ─────────────────────────────────────────
+    try:
+        import soccerdata as sd
+        raw_dir = str(DATA_DIR / "_fbref_raw")
+
+        def _col(df: pd.DataFrame, *names: str) -> str | None:
+            col_map = {c.lower(): c for c in df.columns}
+            for n in names:
+                if n.lower() in col_map:
+                    return col_map[n.lower()]
+            return None
+
+        def _team_avgs_fbref(df: pd.DataFrame, stat: str, prefix: str) -> None:
+            tc = _col(df, "team", "squad", "club")
+            vc = _col(df, "home_away", "venue", "ha", "h_a")
+            sc = _col(df, stat)
+            if not tc or not sc:
+                return
+            for team, grp in df.groupby(tc):
+                tn = _norm(str(team))
+                if tn not in stats:
+                    stats[tn] = {}
+                vals = pd.to_numeric(grp[sc], errors="coerce").dropna()
+                if len(vals) == 0:
+                    continue
+                stats[tn][f"avg_{prefix}"] = round(float(vals.mean()), 1)
+                stats[tn]["n_games"] = max(stats[tn].get("n_games", 0), len(vals))
+                if vc:
+                    h = grp[grp[vc].astype(str).str.upper().str.startswith("H")]
+                    a = grp[grp[vc].astype(str).str.upper().str.startswith("A")]
+                    vh = pd.to_numeric(h[sc], errors="coerce").dropna()
+                    va = pd.to_numeric(a[sc], errors="coerce").dropna()
+                    stats[tn][f"avg_{prefix}_h"] = round(float(vh.mean()), 1) if len(vh) > 0 else None
+                    stats[tn][f"avg_{prefix}_a"] = round(float(va.mean()), 1) if len(va) > 0 else None
+
+        fbref = sd.FBref(leagues=["MEX-Liga MX"], seasons=[season], data_dir=raw_dir)
+        try:
+            pt = fbref.read_team_match_stats(stat_type="passing_types")
+            if pt is not None and not pt.empty:
+                idx = pt.index
+                df_pt = pt.reset_index() if (idx.name or (hasattr(idx, "names") and idx.names[0])) else pt.copy()
+                _team_avgs_fbref(df_pt, "CK", "corners")
+        except Exception:
+            pass
+        try:
+            mc = fbref.read_team_match_stats(stat_type="misc")
+            if mc is not None and not mc.empty:
+                idx = mc.index
+                df_mc = mc.reset_index() if (idx.name or (hasattr(idx, "names") and idx.names[0])) else mc.copy()
+                _team_avgs_fbref(df_mc, "CrdY", "yellows")
+        except Exception:
+            pass
+        if stats:
+            print(f"  FBref: {len(stats)} equipos Liga MX OK")
+    except Exception:
+        pass  # Liga MX no soportada por soccerdata-FBref; caer en fallback
+
+    # ── Intento 2: API-Football (tarjetas amarillas) ──────────────────────────────
+    if not any("avg_yellows" in v for v in stats.values()):
+        print("  FBref sin datos Liga MX -> fallback API-Football (tarjetas)...")
+        af = _load_apifootball_liga_mx_cards()
+        for tn, v in af.items():
+            if tn not in stats:
+                stats[tn] = {}
+            stats[tn].update(v)
+
+    cache_file.write_bytes(json.dumps(stats, ensure_ascii=False, indent=2).encode("utf-8"))
+    if stats:
+        has_yel = sum(1 for v in stats.values() if v.get("avg_yellows") is not None)
+        has_ck  = sum(1 for v in stats.values() if v.get("avg_corners") is not None)
+        print(f"  Stats: {len(stats)} equipos | corners={has_ck} | amarillas={has_yel}")
+    else:
+        print("  Sin datos — corners estimados por λ-att, amarillas N/D")
+    return stats
+
+
+def _get_fbref(team: str, fbref_stats: dict) -> dict:
+    """Busca stats por exacto, contenido parcial, y fuzzy con umbral reducido."""
+    if not fbref_stats:
+        return {}
+    tn = _norm(team)
+    # 1. Exacto
+    if tn in fbref_stats:
+        return fbref_stats[tn]
+    # 2. Contenido: tn en clave o clave en tn (ej. "guadalajara" en "guadalajara chivas")
+    for key in fbref_stats:
+        if (tn and key and tn in key) or (key and tn and key in tn):
+            return fbref_stats[key]
+    # 3. Fuzzy con umbral reducido a 0.55
+    matched = _best_match(team, list(fbref_stats.keys()), threshold=0.55)
+    return fbref_stats.get(matched, {}) if matched else {}
 
 
 def match_odds_to_fixture(
@@ -596,11 +798,29 @@ def generate_predictions(
     ratings: dict,
     table: pd.DataFrame,
     odds: dict | None = None,
+    fbref_stats: dict | None = None,
 ) -> pd.DataFrame:
     """Genera predicciones Liga MX con todos los features requeridos."""
     mu_h = ratings["mu_h"]
     mu_a = ratings["mu_a"]
     rows = []
+
+    # Construir contexto de motivación desde tabla
+    # compute_table usa el nombre del equipo como índice y columna "position"
+    table_rows = []
+    for team_name, tr in table.iterrows():
+        table_rows.append({
+            "team": team_name,
+            "pos":  int(tr.get("position", tr.get("pos", 99))),
+            "pts":  int(tr.get("pts", 0)),
+        })
+    table_rows_sorted = sorted(table_rows, key=lambda x: x["pos"])
+    motiv_ctx = build_ligamx_table_context(table_rows_sorted)
+    print(f"  Contexto de motivación: {len(motiv_ctx)} equipos")
+
+    # Pre-cargar goleadores (una sola llamada API)
+    print("  Cargando goleadores (API-Football)...")
+    _ = scorers_for_team("placeholder", "ligamx")  # warm cache
 
     for rec in sorted(upcoming, key=lambda x: x.get("date", "")):
         home  = rec["home_team"]
@@ -616,11 +836,21 @@ def generate_predictions(
         att_a = a_r.get("att_a")
         def_a = a_r.get("def_a")
 
-        lh = _clip(att_h) * _clip(def_a) * mu_h
-        la = _clip(att_a) * _clip(def_h) * mu_a
+        lh_base = _clip(att_h) * _clip(def_a) * mu_h
+        la_base = _clip(att_a) * _clip(def_h) * mu_a
 
-        p_loc_r, p_emp_r, p_vis_r = poisson_probs(lh, la)
-        p_loc, p_emp, p_vis       = smooth_draw(p_loc_r, p_emp_r, p_vis_r)
+        # ── Motivación ──
+        ctx_h = motiv_ctx.get(home) or motiv_ctx.get(
+            _best_match(home, list(motiv_ctx.keys())) or home)
+        ctx_a = motiv_ctx.get(away) or motiv_ctx.get(
+            _best_match(away, list(motiv_ctx.keys())) or away)
+        f_h = ctx_h["factor"] if ctx_h else 1.0
+        f_a = ctx_a["factor"] if ctx_a else 1.0
+        lh, la = apply_motivation(lh_base, la_base, f_h, f_a)
+
+        # ── Dixon-Coles (mejor estimación de empate) ──
+        p_loc_r, p_emp_r, p_vis_r = dixon_coles_probs(lh, la)
+        p_loc, p_emp, p_vis       = smooth_draw_dc(p_loc_r, p_emp_r, p_vis_r)
 
         probs  = [p_loc, p_emp, p_vis]
         labels = ["Local", "Empate", "Visitante"]
@@ -659,6 +889,49 @@ def generate_predictions(
 
         forma_h = h_r.get("forma", "")
         forma_a = a_r.get("forma", "")
+
+        # ── Contexto enriquecido ──
+        corners = estimate_corners(lh, la)
+
+        # ── Datos FBref: corners reales y amarillas históricas ──
+        h_fbr = _get_fbref(home, fbref_stats or {})
+        a_fbr = _get_fbref(away, fbref_stats or {})
+
+        # Corners: FBref si disponible; si no, base fija Liga MX calibrada por att
+        # NOTA: no usar corners_h_est (ya contiene att_h vía λ → doble efecto)
+        MX_BASE_CK_H = 5.0   # Liga MX: ~5 corners/local/partido
+        MX_BASE_CK_A = 4.5   # Liga MX: ~4.5 corners/visitante/partido
+        ck_h = h_fbr.get("avg_corners_h")
+        ck_a = a_fbr.get("avg_corners_a")
+        if ck_h is not None and ck_a is not None:
+            corners_h_pred  = round(float(ck_h), 1)
+            corners_a_pred  = round(float(ck_a), 1)
+            corners_total_p = round(corners_h_pred + corners_a_pred, 1)
+            corners_fuente  = "FBref"
+        elif att_h is not None and att_a is not None:
+            # Factor att suavizado (^0.4): att=1.0→x1.0, att=2.0→x1.32, att=0.5→x0.76
+            att_h_f = max(0.65, min(1.40, float(att_h) ** 0.4))
+            att_a_f = max(0.65, min(1.40, float(att_a) ** 0.4))
+            corners_h_pred  = round(max(2.0, MX_BASE_CK_H * att_h_f), 1)
+            corners_a_pred  = round(max(2.0, MX_BASE_CK_A * att_a_f), 1)
+            corners_total_p = round(corners_h_pred + corners_a_pred, 1)
+            corners_fuente  = "att-calibrado"
+        else:
+            corners_h_pred  = corners["corners_h_est"]
+            corners_a_pred  = corners["corners_a_est"]
+            corners_total_p = corners["total_est"]
+            corners_fuente  = "λ"
+
+        # Tarjetas amarillas desde FBref (home vs away diferenciado)
+        amar_h = h_fbr.get("avg_yellows_h") or h_fbr.get("avg_yellows")
+        amar_a = a_fbr.get("avg_yellows_a") or a_fbr.get("avg_yellows")
+
+        scorers_h = scorers_for_team(home, "ligamx")
+        scorers_a = scorers_for_team(away, "ligamx")
+        narr = match_narrative(
+            home, away, ctx_h, ctx_a, p_loc, p_emp, p_vis, lh, la,
+            h2h.get("h2h_w_h", 0), h2h.get("h2h_d", 0), h2h.get("h2h_w_a", 0),
+        )
 
         rows.append({
             "fecha":            m_date,
@@ -713,6 +986,35 @@ def generate_predictions(
             "ev_empate":         ev_emp,
             "ev_visitante":      ev_vis,
             "es_value_bet":      True if ev_max is not None and ev_max > 0 else None,
+            # ── Nuevos campos de contexto ──
+            "motivacion_local":    ctx_h["label"] if ctx_h else "N/D",
+            "motivacion_icon_h":   ctx_h["icon"]  if ctx_h else "",
+            "factor_motiv_h":      round(f_h, 3),
+            "motivacion_visita":   ctx_a["label"] if ctx_a else "N/D",
+            "motivacion_icon_a":   ctx_a["icon"]  if ctx_a else "",
+            "factor_motiv_a":      round(f_a, 3),
+            "alerta_empate":       narr["draw_alert"],
+            "narrativa":           " | ".join(narr["narrative"]),
+            "corners_h_est":       corners["corners_h_est"],
+            "corners_a_est":       corners["corners_a_est"],
+            "corners_total_rango": corners["total_range"],
+            # FBref: corners predichos (real si disponible, else lambda)
+            "corners_h_pred":      corners_h_pred,
+            "corners_a_pred":      corners_a_pred,
+            "corners_total_pred":  corners_total_p,
+            "corners_fuente":      corners_fuente,
+            # FBref: tarjetas amarillas históricas
+            "amarillas_local":     round(float(amar_h), 1) if amar_h else None,
+            "amarillas_visita":    round(float(amar_a), 1) if amar_a else None,
+            "amarillas_total":     round(float(amar_h or 0) + float(amar_a or 0), 1) if (amar_h and amar_a) else None,
+            "goleadores_local":    ", ".join(
+                f"{s['player']}({s['goals']}g)" for s in scorers_h
+            ) if scorers_h else "N/D (ref. temporada anterior)",
+            "goleadores_visita":   ", ".join(
+                f"{s['player']}({s['goals']}g)" for s in scorers_a
+            ) if scorers_a else "N/D (ref. temporada anterior)",
+            "lambda_h_base":       round(lh_base, 3),
+            "lambda_a_base":       round(la_base, 3),
         })
 
     return pd.DataFrame(rows)
@@ -772,6 +1074,30 @@ COL_NAMES = {
     "ev_empate":         "Expected Value Empate (ev_empate)",
     "ev_visitante":      "Expected Value Visitante (ev_visitante)",
     "es_value_bet":      "Es Value Bet (ev > 0)",
+    # ── Contexto enriquecido (Dixon-Coles + Motivación + Contexto) ──
+    "motivacion_local":    "Motivacion Local (motivacion_local)",
+    "motivacion_icon_h":   "Icono Motivacion Local (motivacion_icon_h)",
+    "factor_motiv_h":      "Factor Motivacion Local (factor_motiv_h)",
+    "motivacion_visita":   "Motivacion Visitante (motivacion_visita)",
+    "motivacion_icon_a":   "Icono Motivacion Visitante (motivacion_icon_a)",
+    "factor_motiv_a":      "Factor Motivacion Visitante (factor_motiv_a)",
+    "alerta_empate":       "Alerta Empate Probable (alerta_empate)",
+    "narrativa":           "Narrativa del Partido (narrativa)",
+    "corners_h_est":       "Corners Estimados Local (corners_h_est)",
+    "corners_a_est":       "Corners Estimados Visitante (corners_a_est)",
+    "corners_total_rango": "Rango Corners Totales (corners_total_rango)",
+    # FBref corners y tarjetas
+    "corners_h_pred":      "Corners Predichos Local (corners_h)",
+    "corners_a_pred":      "Corners Predichos Visitante (corners_a)",
+    "corners_total_pred":  "Corners Total Predichos (corners_total)",
+    "corners_fuente":      "Fuente Corners (FBref o lambda)",
+    "amarillas_local":     "Amarillas Promedio Local (amarillas_local)",
+    "amarillas_visita":    "Amarillas Promedio Visitante (amarillas_visita)",
+    "amarillas_total":     "Amarillas Total Estimadas (amarillas_total)",
+    "goleadores_local":    "Goleadores Local (goleadores_local)",
+    "goleadores_visita":   "Goleadores Visitante (goleadores_visita)",
+    "lambda_h_base":       "Lambda Local sin Motivacion (lambda_h_base)",
+    "lambda_a_base":       "Lambda Visitante sin Motivacion (lambda_a_base)",
 }
 
 
@@ -1094,6 +1420,14 @@ def generate_docx(
         ("Forma reciente W/D/L",
          f"Últimos 5 partidos de cada equipo (independiente de local/visitante), "
          f"con puntos acumulados (W=3, D=1, L=0, máximo 15)."),
+        ("Corners / Tiros de Esquina",
+         "Promedio histórico de corners por partido desde FBref (passing_types.CK), "
+         "diferenciado por rol: local (avg_corners_h) y visitante (avg_corners_a). "
+         "Fallback: estimación via λ × 3.8 cuando FBref no tiene datos Liga MX."),
+        ("Tarjetas Amarillas",
+         "Promedio histórico de amarillas desde FBref (misc.CrdY), diferenciado "
+         "por rol (local/visitante). Útil para mercados de tarjetas totales. "
+         "Se muestra N/D si FBref no tiene datos para la temporada actual."),
     ]
     for name, desc in ctx_items:
         p = doc.add_paragraph(style="List Bullet")
@@ -1266,6 +1600,30 @@ def generate_docx(
                     f"(goles: {r.get('h2h_gf_h', 0)} - {r.get('h2h_gf_a', 0)})"
                 )
 
+            # Corners y Tarjetas (FBref)
+            ck_h     = r.get("corners_h_pred")
+            ck_a     = r.get("corners_a_pred")
+            ck_tot   = r.get("corners_total_pred")
+            ck_src   = r.get("corners_fuente", "N/D")
+            amar_h   = r.get("amarillas_local")
+            amar_a   = r.get("amarillas_visita")
+            amar_tot = r.get("amarillas_total")
+            if ck_h is not None:
+                p_ck = doc.add_paragraph()
+                p_ck.add_run("Corners estimados: ").bold = True
+                p_ck.add_run(
+                    f"{home[:16]}: ~{ck_h}  |  {away[:16]}: ~{ck_a}  "
+                    f"(Total ~{ck_tot})  [Fuente: {ck_src}]"
+                )
+            if amar_h is not None or amar_a is not None:
+                p_am = doc.add_paragraph()
+                p_am.add_run("Amarillas (prom.): ").bold = True
+                p_am.add_run(
+                    f"{home[:16]}: {amar_h if amar_h is not None else 'N/D'}"
+                    f"  |  {away[:16]}: {amar_a if amar_a is not None else 'N/D'}"
+                    f"  (Total est.: {amar_tot if amar_tot is not None else 'N/D'})"
+                )
+
             # EV
             ev_loc = r.get("ev_local")
             ev_emp = r.get("ev_empate")
@@ -1431,6 +1789,15 @@ def main(odds_file: str | None = None, odds_key: str | None = None) -> None:
         except Exception as e:
             print(f"\n  AVISO: No se pudo cargar odds file: {e}")
 
+    # ── 3.5. Cargar datos FBref (corners + tarjetas) ─────────────────────────────
+    print(f"\n[2.5/4] Estadísticas FBref Liga MX (corners + tarjetas amarillas)...")
+    fbref_stats = load_fbref_ligamx_stats()
+    n_fbref = len(fbref_stats)
+    if n_fbref:
+        print(f"  FBref: {n_fbref} equipos con datos históricos")
+    else:
+        print("  FBref: sin datos — corners se estimarán por λ, tarjetas N/D")
+
     # ── 4. Generar predicciones ───────────────────────────────────────────────────
     print(f"\n[3/4] Generando predicciones para {len(upcoming)} partidos proximos...")
 
@@ -1440,7 +1807,9 @@ def main(odds_file: str | None = None, odds_key: str | None = None) -> None:
         # Generamos docx vacío de metodología de todas formas
         predictions_df = pd.DataFrame()
     else:
-        predictions_df = generate_predictions(upcoming, hist_df, ratings, table, odds)
+        predictions_df = generate_predictions(
+            upcoming, hist_df, ratings, table, odds, fbref_stats=fbref_stats
+        )
 
     # ── 5. Guardar CSV ────────────────────────────────────────────────────────────
     print(f"\n[4/4] Guardando salidas...")

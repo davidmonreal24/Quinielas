@@ -647,6 +647,12 @@ def main(days_ahead: int = 15, history_days: int = 150):
     ev_path = Path("data/sofascore_events.parquet")
     hist_df.to_parquet(ev_path, index=False)
 
+    # Guardar próximos (para predict_ligamx.py y otros scripts)
+    if upcoming:
+        up_path = Path("data/sofascore_upcoming.parquet")
+        pd.DataFrame(upcoming).to_parquet(up_path, index=False)
+        print(f"  Próximos guardados: {up_path} ({len(upcoming)} partidos)")
+
     # ── 3. Verificar que hay partidos próximos ──
     print(f"\n[3/4] Partidos próximos encontrados: {len(upcoming)}")
     if not upcoming:
