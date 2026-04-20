@@ -1,4 +1,4 @@
-"""Reporte Liga MX Jornada 11 — Momios Playdoit en tiempo real"""
+"""Reporte Liga MX — Momios Playdoit en tiempo real (partidos proximos 10 dias)"""
 import requests, json, re
 from datetime import datetime, timezone, timedelta
 from difflib import SequenceMatcher
@@ -54,7 +54,9 @@ for ev in events:
 
 # ── 2. Load model predictions ──
 df = pd.read_csv("data/ligamx_predicciones.csv")
-ligamx = df[df["Fecha"].between("2026-03-21", "2026-03-23")].copy()
+today = datetime.now(CDT).strftime("%Y-%m-%d")
+horizon = (datetime.now(CDT) + timedelta(days=10)).strftime("%Y-%m-%d")
+ligamx = df[df["Fecha"].between(today, horizon)].copy()
 
 
 def norm(s):
@@ -114,7 +116,7 @@ DIAS = {
 
 print()
 print("=" * W)
-print("  LIGA MX CLAUSURA 2026 — JORNADA 11")
+print(f"  LIGA MX CLAUSURA 2026 — Partidos del {today} al {horizon}")
 print("  Momios: PLAYDOIT (tiempo real)  |  Modelo: Ratings Mult. + Poisson")
 print("=" * W)
 
@@ -154,6 +156,27 @@ for _, row in ligamx.sort_values("Fecha").iterrows():
     print(f"  MODELO [{pred}] [Confianza {conf}]  lambda {lh:.2f} vs {la:.2f}")
     print(f"  Local {ph:.1f}% {bar(ph)}  Empate {pd_:.1f}%  Visitante {pv:.1f}%")
 
+    # Corners y Tarjetas (FBref si disponible)
+    try:
+        ck_h   = row.get("Corners Predichos Local (corners_h)")
+        ck_a   = row.get("Corners Predichos Visitante (corners_a)")
+        ck_tot = row.get("Corners Total Predichos (corners_total)")
+        ck_src = row.get("Fuente Corners (FBref o lambda)", "")
+        amar_h = row.get("Amarillas Promedio Local (amarillas_local)")
+        amar_a = row.get("Amarillas Promedio Visitante (amarillas_visita)")
+        amar_t = row.get("Amarillas Total Estimadas (amarillas_total)")
+        if pd.notna(ck_h) and pd.notna(ck_a):
+            src_tag = f" [{ck_src}]" if ck_src else ""
+            ck_tot_s = f"~{float(ck_tot):.1f}" if pd.notna(ck_tot) else "?"
+            print(f"  Corners: {home[:15]} {float(ck_h):.1f}  /  "
+                  f"{away[:15]} {float(ck_a):.1f}  (Total {ck_tot_s}){src_tag}")
+        if pd.notna(amar_h) and pd.notna(amar_a):
+            amar_tot_s = f"~{float(amar_t):.1f}" if pd.notna(amar_t) else "?"
+            print(f"  Amarillas: {home[:15]} {float(amar_h):.1f}  /  "
+                  f"{away[:15]} {float(amar_a):.1f}  (Total {amar_tot_s})")
+    except Exception:
+        pass
+
     if pd_item and all([pd_item["o_h"], pd_item["o_d"], pd_item["o_a"]]):
         oh, od, oa = pd_item["o_h"], pd_item["o_d"], pd_item["o_a"]
         vig = vig_pct(oh, od, oa)
@@ -191,7 +214,7 @@ for _, row in ligamx.sort_values("Fecha").iterrows():
 # ── Resumen ──
 print()
 print("=" * W)
-print("  RESUMEN JORNADA 11  —  Pata simple + momio Playdoit")
+print(f"  RESUMEN  {today} - {horizon}  |  Pata simple + momio Playdoit")
 print("=" * W)
 dia_actual = ""
 for _, row in ligamx.sort_values("Fecha").iterrows():

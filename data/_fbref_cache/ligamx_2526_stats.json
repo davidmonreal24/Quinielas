@@ -1,0 +1,38 @@
+{
+  "guadalajara chivas": {
+    "avg_yellows": 2.2,
+    "n_games": 35
+  },
+  "tigres": {
+    "avg_yellows": 1.9,
+    "n_games": 40
+  },
+  "tijuana": {
+    "avg_yellows": 1.9,
+    "n_games": 38
+  },
+  "toluca": {
+    "avg_yellows": 2.0,
+    "n_games": 42
+  },
+  "monterrey": {
+    "avg_yellows": 1.9,
+    "n_games": 44
+  },
+  "atlas": {
+    "avg_yellows": 2.2,
+    "n_games": 36
+  },
+  "santos": {
+    "avg_yellows": 2.4,
+    "n_games": 34
+  },
+  "u.n.a.m. - pumas": {
+    "avg_yellows": 2.4,
+    "n_games": 38
+  },
+  "america": {
+    "avg_yellows": 1.4,
+    "n_games": 47
+  }
+}
