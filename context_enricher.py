@@ -8,9 +8,11 @@ Enriquece las predicciones con:
   5. Análisis situacional del partido (significado del encuentro)
 """
 from __future__ import annotations
+import json
 import math
 import requests
 import functools
+import unicodedata
 from typing import Optional
 
 # ──────────────────────────────────────────────────────────────
@@ -89,23 +91,34 @@ LIGAMX_RELZONE = 3      # posiciones 16-18 en zona de riesgo (cociente)
 UCL_MOTIVATION = 1.25
 
 def ligamx_situation(pos: int, pts: int, pts_leader: int,
-                     pts_8th: int, pts_16th: int) -> dict:
+                     pts_8th: int, pts_16th: int,
+                     jornada: int = 0, total_jornadas: int = 17) -> dict:
     """
     Retorna situación y factor de motivación para un equipo de Liga MX.
-    pos         : posición actual (1=líder)
-    pts         : puntos actuales
-    pts_leader  : puntos del 1er lugar
-    pts_8th     : puntos del 8vo lugar (último en zona de Liguilla)
-    pts_16th    : puntos del 16vo lugar (límite zona de riesgo cociente)
+    pos               : posición actual (1=líder)
+    pts               : puntos actuales
+    pts_leader        : puntos del 1er lugar
+    pts_8th           : puntos del 8vo lugar (último en zona de Liguilla)
+    pts_16th          : puntos del 16vo lugar (límite zona de riesgo cociente)
+    jornada           : jornada actual (para detectar si ya está eliminado matemáticamente)
+    total_jornadas    : total de jornadas en la fase regular
     """
+    pts_remaining = (total_jornadas - jornada) * 3
     pts_to_playoffs  = max(0, pts_8th  - pts)
     pts_to_leader    = max(0, pts_leader - pts)
     pts_above_danger = pts - pts_16th    # negativo = en zona de riesgo
 
-    if pos <= LIGAMX_DIRECT_QF:
+    # Eliminado matemáticamente: no puede alcanzar el playoff
+    already_eliminated = (pts_remaining > 0) and (pts + pts_remaining < pts_8th)
+
+    if already_eliminated:
+        # Sin incentivo de tabla → motivación mínima (juegan por orgullo/cociente)
+        label  = "Eliminado / Sin incentivo Liguilla"
+        icon   = "💤"
+        factor = 0.88
+    elif pos <= LIGAMX_DIRECT_QF:
         label = "Líder / Cuartos directos"
         icon  = "🏆"
-        # Motivación alta pero más relajada que quien pelea por entrar
         factor = 1.08
     elif pos <= LIGAMX_PLAYOFF:
         label = "Zona Liguilla"
@@ -114,11 +127,11 @@ def ligamx_situation(pos: int, pts: int, pts_leader: int,
     elif pos <= LIGAMX_PLAYOFF + 3:
         label = "Persiguiendo Liguilla"
         icon  = "🔥"
-        factor = 1.18   # Alta motivación — muy cerca del playoff
+        factor = 1.18
     elif pos <= LIGAMX_TOTAL - LIGAMX_RELZONE:
         label = "Zona Media / Segura"
         icon  = "😐"
-        factor = 1.00   # Neutral
+        factor = 1.00
     elif pos <= LIGAMX_TOTAL - 1:
         label = "Zona de Riesgo (cociente)"
         icon  = "⚠️"
@@ -128,17 +141,18 @@ def ligamx_situation(pos: int, pts: int, pts_leader: int,
         icon  = "🆘"
         factor = 1.25
 
-    # Extra boost si la diferencia con el 8vo es ≤ 3 puntos
-    if LIGAMX_PLAYOFF < pos <= LIGAMX_PLAYOFF + 4 and pts_to_playoffs <= 3:
+    # Extra boost si la diferencia con el 8vo es ≤ 3 puntos y aún no eliminado
+    if not already_eliminated and LIGAMX_PLAYOFF < pos <= LIGAMX_PLAYOFF + 4 and pts_to_playoffs <= 3:
         factor = min(factor + 0.05, 1.30)
 
     return {
         "label": label,
         "icon":  icon,
         "factor": factor,
-        "pts_to_playoffs": pts_to_playoffs,
-        "pts_to_leader":   pts_to_leader,
+        "pts_to_playoffs":  pts_to_playoffs,
+        "pts_to_leader":    pts_to_leader,
         "pts_above_danger": pts_above_danger,
+        "eliminated":       already_eliminated,
     }
 
 
@@ -187,17 +201,236 @@ APIFOOTBALL_HDR  = {"x-apisports-key": APIFOOTBALL_KEY}
 
 # Liga MX = 262 | UCL = 2
 LEAGUE_IDS = {"ligamx": 262, "ucl": 2}
-# Última temporada con datos completos disponibles en plan free
 LAST_AVAILABLE = {"ligamx": 2024, "ucl": 2024}
+
+# ─── ESPN Core API (gratuita, sin key) ────────────────────────────────────────
+# ESPN Core API: sports.core.api.espn.com — requiere resolver $ref por atleta/equipo
+# Liga MX Clausura 2026 = season 2025, type 1 (Apertura 2025 = type 2)
+ESPN_CORE_LEADERS_URL = (
+    "https://sports.core.api.espn.com/v2/sports/soccer/leagues/mex.1"
+    "/seasons/2025/types/1/leaders"
+)
+
+# Slugs ESPN por liga
+ESPN_SLUGS = {
+    "ligamx": "mex.1",
+    "ucl":    "uefa.champions",
+}
+
+# ─── Goleadores Clausura 2026 — fallback hardcoded (J17, ESPN Core API) ──────
+# IMPORTANTE: Este diccionario es el FALLBACK cuando la API de ESPN falla.
+# Fuente: ESPN Core API sports.core.api.espn.com — Clausura 2026 (season=2025, type=1)
+# Errores corregidos vs. versiones anteriores:
+#   Djurdjevic: Monterrey → Atlas | Sepúlveda: Chivas → Cruz Azul
+#   Diber Cambindo: León → Necaxa | +5 jugadores (Ruvalcaba, Angulo, Zendejas, Ocampos, Díaz)
+CLAUSURA_2026_SCORERS: list[dict] = [
+    # ── 12 goles ──
+    {"player": "Joao Pedro",             "team": "Atletico San Luis", "goals": 12, "assists": 0},
+    {"player": "Armando Gonzalez",        "team": "Chivas",            "goals": 12, "assists": 0},
+    {"player": "Paulinho",                "team": "Toluca",            "goals": 12, "assists": 0},
+    # ── 9 goles ──
+    {"player": "German Berterame",        "team": "Monterrey",         "goals":  9, "assists": 0},
+    {"player": "Sergio Canales",          "team": "Monterrey",         "goals":  9, "assists": 0},
+    # ── 8 goles ──
+    {"player": "Angel Correa",            "team": "Tigres",            "goals":  8, "assists": 4},
+    {"player": "Juan Brunetta",           "team": "Tigres",            "goals":  8, "assists": 0},
+    {"player": "Oscar Estupinan",         "team": "Juarez",            "goals":  8, "assists": 0},
+    # ── 7 goles ──
+    {"player": "Brian Rodriguez",         "team": "America",           "goals":  7, "assists": 4},
+    {"player": "Uros Djurdjevic",         "team": "Atlas",             "goals":  7, "assists": 0},
+    {"player": "Angel Sepulveda",         "team": "Cruz Azul",         "goals":  7, "assists": 0},
+    {"player": "Gabriel Fernandez",       "team": "Cruz Azul",         "goals":  7, "assists": 0},
+    # ── 6 goles ──
+    {"player": "Emiliano Gomez",          "team": "Puebla",            "goals":  6, "assists": 0},
+    {"player": "Frank Thierry Boya",      "team": "Tijuana",           "goals":  6, "assists": 0},
+    {"player": "Diber Cambindo",          "team": "Necaxa",            "goals":  6, "assists": 0},
+    {"player": "Ali Avila",               "team": "Queretaro",         "goals":  6, "assists": 0},
+    # ── 5 goles ──
+    {"player": "Diego Gonzalez",          "team": "Atlas",             "goals":  5, "assists": 5},
+    {"player": "Kevin Castaneda",         "team": "Tijuana",           "goals":  5, "assists": 4},
+    {"player": "Jorge Ruvalcaba",         "team": "Pumas",             "goals":  5, "assists": 0},
+    {"player": "Jesus Angulo",            "team": "Toluca",            "goals":  5, "assists": 0},
+    {"player": "Alejandro Zendejas",      "team": "America",           "goals":  5, "assists": 0},
+    {"player": "Lucas Ocampos",           "team": "Monterrey",         "goals":  5, "assists": 6},
+    {"player": "Ismael Diaz",             "team": "Leon",              "goals":  5, "assists": 0},
+]
+
+# ─── Asistencias Clausura 2026 — ESPN J17 ────────────────────────────────────
+CLAUSURA_2026_ASSISTS: list[dict] = [
+    {"player": "Alexis Vega",             "team": "Toluca",            "assists": 9},
+    {"player": "Nicolas Castro",          "team": "Toluca",            "assists": 7},
+    {"player": "Lucas Ocampos",           "team": "Monterrey",         "assists": 6},
+    {"player": "Diego Gonzalez",          "team": "Atlas",             "assists": 5},
+    {"player": "Jose Abella",             "team": "Santos Laguna",     "assists": 5},
+    {"player": "Jose Paradela",           "team": "Cruz Azul",         "assists": 5},
+    {"player": "Ramiro Arciga",           "team": "Tijuana",           "assists": 5},
+    {"player": "Richard Ledezma",         "team": "Chivas",            "assists": 5},
+    {"player": "Angel Correa",            "team": "Tigres",            "assists": 4},
+    {"player": "Kevin Castaneda",         "team": "Tijuana",           "assists": 4},
+    {"player": "Adalberto Carrasquilla",  "team": "Pumas",             "assists": 4},
+    {"player": "Carlos Rodriguez",        "team": "Cruz Azul",         "assists": 4},
+    {"player": "Efrain Alvarez",          "team": "Chivas",            "assists": 4},
+    {"player": "Brian Rodriguez",         "team": "America",           "assists": 4},
+    {"player": "Victor Guzman",           "team": "Pachuca",           "assists": 4},
+    {"player": "Juan Manuel Sanabria",    "team": "Atletico San Luis", "assists": 4},
+    {"player": "Jesus Vega",              "team": "Tijuana",           "assists": 4},
+]
+
+
+# ─── ESPN Core API auto-fetch ─────────────────────────────────────────────────
+
+def _resolve_espn_ref(url: str) -> dict:
+    """Resolve an ESPN Core API $ref URL. Returns {} on any error."""
+    import urllib.request as _req
+    try:
+        url = url.replace("http://", "https://")
+        with _req.urlopen(url, timeout=5) as r:
+            return json.load(r)
+    except Exception:
+        return {}
+
+
+def _fetch_espn_core_leaders(category: str = "goals") -> list[dict]:
+    """
+    Fetches Liga MX leaders from ESPN Core API.
+    Resolves athlete/team $ref references to get full names.
+    Returns [{player, team, <category>, source}] or [] on failure.
+    """
+    try:
+        r = requests.get(ESPN_CORE_LEADERS_URL, timeout=12,
+                         headers={"User-Agent": "Mozilla/5.0"})
+        if r.status_code != 200:
+            return []
+        data = r.json()
+    except Exception:
+        return []
+
+    categories = data.get("categories", [])
+    cat = next((c for c in categories if c.get("name") == category), None)
+    if not cat:
+        return []
+
+    result: list[dict] = []
+    team_cache: dict[str, str] = {}
+
+    for entry in cat.get("leaders", [])[:25]:
+        try:
+            ath_ref  = entry.get("athlete", {}).get("$ref", "")
+            team_ref = entry.get("team", {}).get("$ref", "")
+            value    = int(float(entry.get("value", 0)))
+
+            ath_data = _resolve_espn_ref(ath_ref)
+            name     = ath_data.get("fullName", "?")
+
+            if team_ref not in team_cache:
+                team_data = _resolve_espn_ref(team_ref)
+                raw_name  = team_data.get("displayName", "?")
+                # Normalize to canonical name used in TEAM_ALIASES values
+                canon = TEAM_ALIASES.get(
+                    _strip_accents(raw_name.lower()), raw_name
+                )
+                team_cache[team_ref] = canon
+            team_name = team_cache[team_ref]
+
+            result.append({
+                "player": name,
+                "team":   team_name,
+                category: value,
+                "source": "espn_core_api",
+            })
+        except Exception:
+            continue
+
+    return result
+
+
+def fetch_espn_ligamx_scorers(ttl_hours: int = 6) -> list[dict]:
+    """
+    Descarga tabla de goleadores Liga MX desde ESPN Core API (gratuita, sin key).
+    Caché local en data/_espn_cache/ligamx_scorers.json (TTL configurable).
+    Retorna [] si falla (llamador usa CLAUSURA_2026_SCORERS como fallback).
+    """
+    import time as _time
+    from pathlib import Path as _Path
+
+    cache_dir  = _Path("data/_espn_cache")
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    cache_file = cache_dir / "ligamx_scorers.json"
+
+    # ── Leer caché si es vigente ──
+    if cache_file.exists():
+        try:
+            cached = json.loads(cache_file.read_bytes().decode("utf-8"))
+            age_h  = (_time.time() - cached.get("fetched_at", 0)) / 3600
+            if age_h < ttl_hours and cached.get("scorers"):
+                return cached["scorers"]
+        except Exception:
+            pass
+
+    # ── Llamar ESPN Core API ──
+    scorers = _fetch_espn_core_leaders("goals")
+    if not scorers:
+        return []
+
+    # Añadir campo "goals" como alias para compatibilidad
+    cache_file.write_bytes(
+        json.dumps({"fetched_at": _time.time(), "scorers": scorers},
+                   ensure_ascii=False).encode("utf-8")
+    )
+    print(f"  [ESPN Core] Goleadores actualizados: {len(scorers)} jugadores")
+    return scorers
+
+
+def fetch_espn_ligamx_assists(ttl_hours: int = 6) -> list[dict]:
+    """
+    Descarga tabla de asistencias Liga MX desde ESPN Core API.
+    Retorna [] si falla (llamador usa CLAUSURA_2026_ASSISTS como fallback).
+    """
+    import time as _time
+    from pathlib import Path as _Path
+
+    cache_dir  = _Path("data/_espn_cache")
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    cache_file = cache_dir / "ligamx_assists.json"
+
+    if cache_file.exists():
+        try:
+            cached = json.loads(cache_file.read_bytes().decode("utf-8"))
+            age_h  = (_time.time() - cached.get("fetched_at", 0)) / 3600
+            if age_h < ttl_hours and cached.get("assists"):
+                return cached["assists"]
+        except Exception:
+            pass
+
+    assists = _fetch_espn_core_leaders("assists")
+    if not assists:
+        return []
+
+    cache_file.write_bytes(
+        json.dumps({"fetched_at": _time.time(), "assists": assists},
+                   ensure_ascii=False).encode("utf-8")
+    )
+    return assists
 
 
 @functools.lru_cache(maxsize=4)
 def fetch_top_scorers(league: str) -> list[dict]:
     """
-    Descarga los top-20 goleadores de la última temporada disponible.
-    Retorna lista de {player, team, goals}.
-    Cachea en memoria para no repetir llamadas.
+    Goleadores Liga MX:
+      1. Intenta ESPN API (gratuita, datos en tiempo real, sin key)
+      2. Fallback: CLAUSURA_2026_SCORERS hardcoded (actualizado J17)
+
+    UCL: intenta API-Football season 2024.
     """
+    if league == "ligamx":
+        live = fetch_espn_ligamx_scorers(ttl_hours=6)
+        if live:
+            return live
+        # Fallback hardcoded
+        print("  [scorers] ESPN API no disponible — usando datos hardcoded (J17)")
+        return CLAUSURA_2026_SCORERS
+
+    # UCL / otras ligas → API-Football
     lid = LEAGUE_IDS.get(league)
     ssn = LAST_AVAILABLE.get(league)
     if lid is None or ssn is None:
@@ -217,61 +450,127 @@ def fetch_top_scorers(league: str) -> list[dict]:
             p    = item["player"]
             stat = item["statistics"][0]
             result.append({
-                "player": p["name"],
-                "team":   stat["team"]["name"],
-                "goals":  stat["goals"].get("total") or 0,
-                "season": ssn,
+                "player":  p["name"],
+                "team":    stat["team"]["name"],
+                "goals":   stat["goals"].get("total") or 0,
+                "assists": stat["goals"].get("assists") or 0,
             })
         return result
     except Exception:
         return []
 
 
-# Aliases: nombre Sofascore → nombre API-Football (cuando difieren mucho)
+def get_assists_for_team(team_name: str, top_n: int = 3) -> list[dict]:
+    """
+    Retorna los top asistidores de un equipo en el torneo actual.
+    Intenta ESPN API primero, fallback a CLAUSURA_2026_ASSISTS.
+    """
+    live = fetch_espn_ligamx_assists(ttl_hours=6)
+    source = live if live else CLAUSURA_2026_ASSISTS
+    key = _strip_accents(team_name.lower().strip())
+    resolved = TEAM_ALIASES.get(key)
+    if resolved is None:
+        return []
+    return [a for a in source
+            if a.get("team", "").lower() == resolved.lower()][:top_n]
+
+
+# Aliases: nombre Sofascore → equipo en CLAUSURA_2026_SCORERS (campo "team")
 TEAM_ALIASES: dict[str, str] = {
-    "pumas unam":        "u.n.a.m. - pumas",
-    "cd guadalajara":    "guadalajara chivas",
-    "guadalajara":       "guadalajara chivas",
-    "chivas":            "guadalajara chivas",
-    "cf monterrey":      "monterrey",
-    "cf pachuca":        "pachuca",
-    "cd toluca":         "toluca",
-    "atletico san luis": "atletico san luis",
-    "atlas fc":          "atlas",
-    "mazatlan fc":       "mazatlan",
-    "club america":      "club america",
-    "club necaxa":       "necaxa",
-    "club tijuana":      "club tijuana",
-    "club puebla":       "puebla",
-    "club leon":         "leon",
-    "fc juarez":         "juarez",
-    "santos laguna":     "santos laguna",
-    "queretaro fc":      "queretaro",
-    "cruz azul":         "cruz azul",
-    "tigres uanl":       "tigres uanl",
+    # Chivas / Guadalajara
+    "cd guadalajara":    "Chivas",
+    "guadalajara":       "Chivas",
+    "chivas":            "Chivas",
+    # América
+    "club america":      "America",
+    "america":           "America",
+    # Monterrey
+    "cf monterrey":      "Monterrey",
+    "monterrey":         "Monterrey",
+    # Tigres
+    "tigres uanl":       "Tigres",
+    "tigres":            "Tigres",
+    # Pumas
+    "pumas unam":        "Pumas",
+    "pumas":             "Pumas",
+    # Pachuca
+    "cf pachuca":        "Pachuca",
+    "pachuca":           "Pachuca",
+    # Cruz Azul
+    "cruz azul":         "Cruz Azul",
+    # Toluca
+    "cd toluca":         "Toluca",
+    "toluca":            "Toluca",
+    # León
+    "club leon":         "Leon",
+    "leon":              "Leon",
+    # Atlético San Luis
+    "atletico san luis": "Atletico San Luis",
+    "atletico de san luis": "Atletico San Luis",
+    # Atlas
+    "atlas fc":          "Atlas",
+    "atlas":             "Atlas",
+    # Mazatlán
+    "mazatlan fc":       "Mazatlan",
+    "mazatlan":          "Mazatlan",
+    # Necaxa
+    "club necaxa":       "Necaxa",
+    "necaxa":            "Necaxa",
+    # Tijuana
+    "club tijuana":      "Tijuana",
+    "tijuana":           "Tijuana",
+    # Puebla
+    "club puebla":       "Puebla",
+    "puebla":            "Puebla",
+    # FC Juárez
+    "fc juarez":         "Juarez",
+    "juarez":            "Juarez",
+    # Santos
+    "santos laguna":     "Santos Laguna",
+    "santos":            "Santos Laguna",
+    # Querétaro
+    "queretaro fc":      "Queretaro",
+    "queretaro":         "Queretaro",
 }
 
 
+def _strip_accents(s: str) -> str:
+    return "".join(
+        c for c in unicodedata.normalize("NFD", str(s))
+        if unicodedata.category(c) != "Mn"
+    )
+
+
 def scorers_for_team(team_name: str, league: str, top_n: int = 3) -> list[dict]:
-    """Retorna los top_n goleadores de un equipo (alias + fuzzy match)."""
+    """Retorna los top_n goleadores de un equipo (alias → match exacto → fuzzy)."""
     from difflib import SequenceMatcher
     all_scorers = fetch_top_scorers(league)
     if not all_scorers:
         return []
 
-    # Resolver alias primero
-    key = team_name.lower().strip()
-    resolved = TEAM_ALIASES.get(key, key)
+    # Normalizar: minúsculas + sin acentos para buscar en alias
+    key = _strip_accents(team_name.lower().strip())
+    resolved = TEAM_ALIASES.get(key, None)
 
+    # Si no hay alias definido, el equipo no es de los top-scorers conocidos
+    if resolved is None:
+        return []
+
+    # Match exacto (case-insensitive) contra el campo "team" de los scorers
+    exact = [s for s in all_scorers if s["team"].lower() == resolved.lower()]
+    if exact:
+        return exact[:top_n]
+
+    # Fuzzy como último recurso solo con umbral muy alto (≥ 0.80) para evitar falsos positivos
     def sim(a: str, b: str) -> float:
         return SequenceMatcher(None, a.lower(), b.lower()).ratio()
 
     teams_in_data = list({s["team"] for s in all_scorers})
     best_team = max(teams_in_data, key=lambda t: sim(resolved, t), default="")
-    if sim(resolved, best_team) < 0.40:
-        return []
+    if sim(resolved, best_team) >= 0.80:
+        return [s for s in all_scorers if s["team"] == best_team][:top_n]
 
-    return [s for s in all_scorers if s["team"] == best_team][:top_n]
+    return []
 
 
 # ──────────────────────────────────────────────────────────────

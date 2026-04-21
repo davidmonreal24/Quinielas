@@ -1,0 +1,10 @@
+local,visitante,fecha,goles_l,goles_v,resultado_real,prediccion,correcto,confianza,ph,pd,pv,lh,la,p_correcto,brier,log_loss
+Atlético San Luis,Pumas UNAM,2026-04-17,0,2,Visitante,Local,False,BAJA,0.39299999999999996,0.251,0.35600000000000004,1.746,1.658,0.356,0.6322,1.0328
+Mazatlán FC,Querétaro FC,2026-04-17,1,1,Empate,Local,False,ALTA,0.8390000000000001,0.15,0.011000000000000001,4.208,0.509,0.15,1.4265,1.8971
+Cruz Azul,Club Tijuana,2026-04-18,1,1,Empate,Local,False,ALTA,0.466,0.284,0.25,1.563,1.092,0.284,0.7923,1.2588
+Club Necaxa,Tigres UANL,2026-04-18,1,1,Empate,Visitante,False,ALTA,0.266,0.27,0.46299999999999997,1.231,1.676,0.27,0.818,1.3093
+CF Monterrey,CF Pachuca,2026-04-18,1,3,Visitante,Empate,False,BAJA,0.327,0.342,0.33,1.004,1.01,0.33,0.6728,1.1087
+CD Guadalajara,Club Puebla,2026-04-18,5,0,Local,Local,True,ALTA,0.642,0.276,0.08199999999999999,1.504,0.392,0.642,0.2111,0.4432
+Club América,CD Toluca,2026-04-18,2,1,Local,Visitante,False,ALTA,0.08900000000000001,0.23800000000000002,0.6729999999999999,0.522,1.802,0.089,1.3395,2.4191
+Club León,FC Juárez,2026-04-19,3,1,Local,Local,True,ALTA,0.675,0.22,0.105,2.033,0.697,0.675,0.165,0.393
+Santos Laguna,Atlas FC,2026-04-19,0,1,Visitante,Local,False,ALTA,0.562,0.26899999999999996,0.16899999999999998,1.691,0.836,0.169,1.0788,1.7779

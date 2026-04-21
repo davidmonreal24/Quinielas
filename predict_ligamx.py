@@ -552,10 +552,28 @@ def _weighted_mean(series: pd.Series) -> float:
     return float(np.average(series.values, weights=weights))
 
 
-def _clip(v, lo: float = 0.30, hi: float = 3.50) -> float:
+def _clip(v, lo: float = 0.30, hi: float = 2.20) -> float:
+    """Clip individual rating factor. Reducido a 2.2 para evitar lambdas extremas."""
     if v is None:
         return 1.0
     return max(lo, min(hi, float(v)))
+
+
+LAMBDA_MAX = 3.2   # Ningún equipo de Liga MX debería esperar más de 3.2 goles
+
+def _clip_lambda(lam: float) -> float:
+    return max(0.20, min(LAMBDA_MAX, lam))
+
+
+def _form_multiplier(forma: str) -> float:
+    """Factor 0.92–1.08 basado en últimos 3 resultados recientes."""
+    if not forma:
+        return 1.0
+    recent3 = forma[-3:]
+    pts = sum({"W": 3, "D": 1, "L": 0}.get(c, 0) for c in recent3)
+    max_pts = len(recent3) * 3
+    # Escala lineal: 0 pts→0.92, 3pts→1.0, 6pts→1.04, 9pts→1.08
+    return round(0.92 + (pts / max(max_pts, 1)) * 0.16, 3)
 
 
 def _ppmf(k: int, lam: float) -> float:
@@ -591,9 +609,29 @@ def form_pts(forma: str) -> int:
 
 
 # ─── Ratings multiplicativos ────────────────────────────────────────────────────
+# Shrinkage Bayesiano: con pocos juegos, el rating se acerca a 1.0 (promedio liga)
+# Formula: rating_adj = (n * rating + k) / (n + k)  donde k = prior strength
+SHRINK_K = 4   # 4 partidos = mitad del camino entre rating puro y promedio
+
+def _shrink(rating: float, n: int, k: float = SHRINK_K) -> float:
+    """Regresa rating hacia 1.0 cuando hay pocos partidos (shrinkage Bayesiano)."""
+    return (n * rating + k * 1.0) / (n + k)
+
+
+def _exp_weighted_mean(series: pd.Series, alpha: float = 0.7) -> float:
+    """Media ponderada exponencial: más reciente = mayor peso (EWM)."""
+    n = len(series)
+    if n == 0:
+        return 0.0
+    # Pesos: alpha^(n-1), alpha^(n-2), ..., alpha^0 (más reciente = alpha^0 = 1)
+    weights = np.array([alpha ** (n - 1 - i) for i in range(n)], dtype=float)
+    return float(np.average(series.values, weights=weights))
+
+
 def compute_ratings(df: pd.DataFrame) -> dict:
     """
     Calcula ratings multiplicativos att/def para cada equipo.
+    Mejoras v2: shrinkage Bayesiano, ponderación exponencial, ventana deslizante corta.
     Retorna: {"teams": {...}, "mu_h": float, "mu_a": float, "home_adv": float}
     """
     fallback = {"teams": {}, "mu_h": 1.40, "mu_a": 1.18, "home_adv": 1.19}
@@ -618,11 +656,28 @@ def compute_ratings(df: pd.DataFrame) -> dict:
         ag = df[df["away_team"] == team].sort_values("date")
         nh, na = len(hg), len(ag)
 
-        # Media ponderada (más reciente = mayor peso)
-        att_h = (_weighted_mean(hg["home_goals"].tail(WINDOW)) / mu_h) if nh >= MIN_GAMES else None
-        def_h = (_weighted_mean(hg["away_goals"].tail(WINDOW)) / mu_a) if nh >= MIN_GAMES else None
-        att_a = (_weighted_mean(ag["away_goals"].tail(WINDOW)) / mu_a) if na >= MIN_GAMES else None
-        def_a = (_weighted_mean(ag["home_goals"].tail(WINDOW)) / mu_h) if na >= MIN_GAMES else None
+        # Ponderación exponencial con ventana deslizante
+        hg_w = hg.tail(WINDOW)
+        ag_w = ag.tail(WINDOW)
+        nh_w = len(hg_w)
+        na_w = len(ag_w)
+
+        # Rating bruto con EWM
+        if nh_w >= MIN_GAMES:
+            raw_att_h = _exp_weighted_mean(hg_w["home_goals"]) / mu_h
+            raw_def_h = _exp_weighted_mean(hg_w["away_goals"]) / mu_a
+            att_h = _shrink(raw_att_h, nh_w)
+            def_h = _shrink(raw_def_h, nh_w)
+        else:
+            att_h = def_h = None
+
+        if na_w >= MIN_GAMES:
+            raw_att_a = _exp_weighted_mean(ag_w["away_goals"]) / mu_a
+            raw_def_a = _exp_weighted_mean(ag_w["home_goals"]) / mu_h
+            att_a = _shrink(raw_att_a, na_w)
+            def_a = _shrink(raw_def_a, na_w)
+        else:
+            att_a = def_a = None
 
         # Forma reciente (últimos 5 partidos, orden cronológico)
         recent = (
@@ -836,8 +891,14 @@ def generate_predictions(
         att_a = a_r.get("att_a")
         def_a = a_r.get("def_a")
 
-        lh_base = _clip(att_h) * _clip(def_a) * mu_h
-        la_base = _clip(att_a) * _clip(def_h) * mu_a
+        lh_base = _clip_lambda(_clip(att_h) * _clip(def_a) * mu_h)
+        la_base = _clip_lambda(_clip(att_a) * _clip(def_h) * mu_a)
+
+        # ── Forma reciente como multiplicador (±8% basado en últimos 3) ──
+        forma_h = h_r.get("forma", "")
+        forma_a = a_r.get("forma", "")
+        lh_base = _clip_lambda(lh_base * _form_multiplier(forma_h))
+        la_base = _clip_lambda(la_base * _form_multiplier(forma_a))
 
         # ── Motivación ──
         ctx_h = motiv_ctx.get(home) or motiv_ctx.get(
@@ -847,6 +908,7 @@ def generate_predictions(
         f_h = ctx_h["factor"] if ctx_h else 1.0
         f_a = ctx_a["factor"] if ctx_a else 1.0
         lh, la = apply_motivation(lh_base, la_base, f_h, f_a)
+        lh, la = _clip_lambda(lh), _clip_lambda(la)
 
         # ── Dixon-Coles (mejor estimación de empate) ──
         p_loc_r, p_emp_r, p_vis_r = dixon_coles_probs(lh, la)
@@ -854,7 +916,13 @@ def generate_predictions(
 
         probs  = [p_loc, p_emp, p_vis]
         labels = ["Local", "Empate", "Visitante"]
-        pred   = labels[probs.index(max(probs))]
+        best_idx = probs.index(max(probs))
+        # Reportar "Empate" cuando P(X)>25% y la diferencia con el mejor es <10pp
+        sorted_p = sorted(probs, reverse=True)
+        if best_idx != 1 and p_emp >= 0.25 and (sorted_p[0] - p_emp) < 0.10:
+            pred = "Empate"
+        else:
+            pred = labels[best_idx]
 
         # Odds y EV — fuzzy matching contra The Odds API
         ev_loc = ev_emp = ev_vis = ev_max = None
@@ -886,9 +954,6 @@ def generate_predictions(
         tbl_h = _table_info(table, home)
         tbl_a = _table_info(table, away)
         h2h   = compute_h2h(hist_df, home, away)
-
-        forma_h = h_r.get("forma", "")
-        forma_a = a_r.get("forma", "")
 
         # ── Contexto enriquecido ──
         corners = estimate_corners(lh, la)

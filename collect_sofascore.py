@@ -75,14 +75,33 @@ WINDOW     = 8      # partidos para forma reciente
 # CLIENTE API
 # ─────────────────────────────────────────────
 
+def _cache_is_stale(data: list) -> bool:
+    """Detecta si la caché tiene partidos que debían haber terminado pero siguen como notstarted."""
+    import time as _time
+    now_ts = _time.time()
+    for ev in data:
+        ts = ev.get("timestamp", 0)
+        status = ev.get("status", {}).get("type", "")
+        # Si un partido estaba programado hace más de 4 horas y sigue como notstarted → caché stale
+        if status == "notstarted" and ts > 0 and (now_ts - ts) > 4 * 3600:
+            return True
+    return False
+
+
 def _ss_get_date(d: str, use_cache: bool = True) -> list:
     """
     GET /api/sofascore/v1/match/list?sport_slug=football&date=YYYY-MM-DD
     Retorna lista de partidos. Usa caché si use_cache=True.
+    Invalida automáticamente cachés con partidos pasados en status notstarted.
     """
     cache = CACHE_DIR / f"matches_{d}.json"
     if use_cache and cache.exists():
-        return json.loads(cache.read_bytes().decode("utf-8"))
+        cached = json.loads(cache.read_bytes().decode("utf-8"))
+        if not _cache_is_stale(cached):
+            return cached
+        # Caché stale → eliminar y refrescar
+        cache.unlink()
+        print(f"  Caché stale detectada y eliminada: {cache.name}")
 
     time.sleep(SOFASCORE_RATE)
     hdrs = {"x-rapidapi-key": SOFASCORE_KEY, "x-rapidapi-host": SOFASCORE_HOST}
@@ -135,9 +154,11 @@ def parse_ss_event(ev: dict) -> dict | None:
         seas = ev.get("season", {})
         rnd  = ev.get("round", {})
 
+        # Convertir a CDT (UTC-6) para que partidos del viernes noche no aparezcan como sábado
+        CDT = timezone(timedelta(hours=-6))
         return {
             "event_id":      ev.get("id"),
-            "date":          datetime.fromtimestamp(ts, tz=timezone.utc).date().isoformat(),
+            "date":          datetime.fromtimestamp(ts, tz=CDT).date().isoformat(),
             "timestamp":     ts,
             "status":        status,
             "is_result":     finished,
