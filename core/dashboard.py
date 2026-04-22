@@ -1,10 +1,17 @@
 """Genera dashboard.html con predicciones Liga MX + UCL actualizadas."""
+import sys
+from pathlib import Path
+_ROOT = Path(__file__).resolve().parent.parent
+if str(_ROOT / "utils") not in sys.path:
+    sys.path.insert(0, str(_ROOT / "utils"))
+    sys.path.insert(0, str(_ROOT))
+
+from utils.config import ODDS_API_KEY  # noqa: E402
 import pandas as pd
 import requests
 import re
 from datetime import datetime, timezone, timedelta
 from difflib import SequenceMatcher
-from pathlib import Path
 
 CDT = timezone(timedelta(hours=-6))
 today_str = datetime.now(CDT).strftime("%Y-%m-%d")
@@ -46,7 +53,7 @@ for ev in adata["events"]:
 # ══════════════════════════════════════════════════════════════
 # 2. THE ODDS API — UCL
 # ══════════════════════════════════════════════════════════════
-API_KEY = "306f7fec9f210e1c341292af655dd0d0"
+API_KEY = ODDS_API_KEY
 r2 = requests.get(
     "https://api.the-odds-api.com/v4/sports/soccer_uefa_champs_league/odds/",
     params={"apiKey": API_KEY, "regions": "eu", "markets": "h2h", "oddsFormat": "decimal"},

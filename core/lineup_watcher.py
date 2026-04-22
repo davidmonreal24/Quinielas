@@ -35,11 +35,17 @@ FLUJO PREVIO:
 =====================================================================
 """
 
+import sys
+from pathlib import Path as _Path
+_ROOT = _Path(__file__).resolve().parent.parent
+for _p in (str(_ROOT / "utils"), str(_ROOT)):
+    if _p not in sys.path:
+        sys.path.insert(0, _p)
+
 import argparse
 import json
 import math
 import re
-import sys
 from difflib import SequenceMatcher
 from pathlib import Path
 

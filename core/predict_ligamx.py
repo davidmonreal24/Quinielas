@@ -28,6 +28,13 @@ Uso             :
   python predict_ligamx.py --odds-file odds.json
 """
 
+import sys as _sys
+from pathlib import Path as _Path
+_ROOT = _Path(__file__).resolve().parent.parent
+for _p in (str(_ROOT / "utils"), str(_ROOT)):
+    if _p not in _sys.path:
+        _sys.path.insert(0, _p)
+
 import argparse
 import json
 import math
@@ -1883,6 +1890,16 @@ def main(odds_file: str | None = None, odds_key: str | None = None) -> None:
         out_df = predictions_df.rename(columns=COL_NAMES)
         out_df.to_csv(OUT_CSV, index=False, encoding="utf-8-sig")
         print(f"  CSV: {OUT_CSV}  ({len(out_df)} partidos x {len(out_df.columns)} columnas)")
+
+        # Archivar copia por fecha para backtesting futuro
+        from utils.config import ARCHIVE_DIR
+        ARCHIVE_DIR.mkdir(parents=True, exist_ok=True)
+        from datetime import datetime as _dt, timezone as _tz, timedelta as _td
+        _stamp = _dt.now(_tz(timedelta(hours=-6))).strftime("%Y-%m-%d")
+        archive_path = ARCHIVE_DIR / f"ligamx_predicciones_{_stamp}.csv"
+        if not archive_path.exists():
+            out_df.to_csv(archive_path, index=False, encoding="utf-8-sig")
+            print(f"  Archivado: {archive_path}")
 
         dist = predictions_df["prediccion"].value_counts().to_dict()
         alta = (predictions_df["nivel_confianza"] == "ALTA").sum()

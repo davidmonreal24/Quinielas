@@ -45,9 +45,7 @@ import requests
 # CONFIGURACIÓN
 # ─────────────────────────────────────────────
 
-SOFASCORE_KEY  = "c2e4c0828cmsh0e044c60fbedf45p1e0984jsn12eecacdf11d"
-SOFASCORE_HOST = "sofascore6.p.rapidapi.com"
-SOFASCORE_BASE = f"https://{SOFASCORE_HOST}/api/sofascore/v1"
+from utils.config import SOFASCORE_KEY, SOFASCORE_HOST, SOFASCORE_BASE  # noqa: E402
 SOFASCORE_RATE = 0.8   # segundos entre peticiones
 
 CACHE_DIR = Path("data/_sofascore_cache")

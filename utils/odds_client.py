@@ -1,7 +1,7 @@
 """
 =====================================================================
   odds_client.py — The Odds API (v4)
-  Key: 306f7fec9f210e1c341292af655dd0d0
+  Key: cargada desde utils/config.py (.env)
 
   Uso como módulo:
     from odds_client import fetch_odds, find_match, format_edge
@@ -30,8 +30,7 @@ import requests
 # CONFIGURACIÓN
 # ─────────────────────────────────────────────
 
-ODDS_API_KEY = "306f7fec9f210e1c341292af655dd0d0"
-ODDS_BASE    = "https://api.the-odds-api.com/v4"
+from utils.config import ODDS_API_KEY, ODDS_API_BASE as ODDS_BASE  # noqa: E402
 CACHE_DIR    = Path("data/_odds_cache")
 CACHE_DIR.mkdir(parents=True, exist_ok=True)
 

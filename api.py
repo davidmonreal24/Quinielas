@@ -1,22 +1,50 @@
 #!/usr/bin/env python3
 """
-api.py  —  Data Analysis Picks  /  Backend API
-===============================================
-FastAPI que sirve los datos de predict_ligamx.py al dashboard React.
+api.py — Data Analysis Picks / Backend API
+==========================================
+FastAPI que sirve predicciones Liga MX + UCL al dashboard React.
 
 Uso:
-  python api.py               → inicia en http://localhost:8000
-  uvicorn api:app --reload    → con hot-reload
-"""
+  python api.py                          → http://0.0.0.0:8000
+  uvicorn api:app --host 0.0.0.0 --port 8000 --reload
 
+Endpoints:
+  GET /api/picks        → predicciones completas (74 campos)
+  GET /api/summary      → KPIs y estadísticas agregadas
+  GET /api/value-bets   → solo picks con EV positivo
+  GET /health           → estado del servicio
+  GET /                 → Dashboard React (dashboard/dist/)
+"""
 import math
+import sys
 from pathlib import Path
+from datetime import datetime, timezone, timedelta
+
+# ── Asegurar que utils/ y el root estén en el path ───────────────────────────
+_ROOT = Path(__file__).resolve().parent
+for _p in (str(_ROOT / "utils"), str(_ROOT)):
+    if _p not in sys.path:
+        sys.path.insert(0, _p)
+
+from utils.config import PATHS
+from utils.logger import get_logger
+
+import pandas as pd
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
-import pandas as pd
+from fastapi.responses import JSONResponse
 
-app = FastAPI(title="Data Analysis Picks API", version="1.0")
+log = get_logger("api")
+CDT = timezone(timedelta(hours=-6))
+
+# ─────────────────────────────────────────────────────────────────────────────
+app = FastAPI(
+    title="Data Analysis Picks API",
+    version="2.0",
+    docs_url="/api/docs",
+    redoc_url=None,
+)
 
 app.add_middleware(
     CORSMiddleware,
@@ -25,10 +53,12 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-DATA_DIR  = Path("data")
-CSV_PATH  = DATA_DIR / "ligamx_predicciones.csv"
+CSV_PATH   = PATHS["ligamx_csv"]
+REACT_DIST = _ROOT / "dashboard" / "dist"
 
+# ─────────────────────────────────────────────────────────────────────────────
 # Mapeo: columna larga CSV → clave corta JSON
+# ─────────────────────────────────────────────────────────────────────────────
 COL_MAP = {
     "Fecha":                                                            "fecha",
     "Fase / Jornada":                                                   "fase",
@@ -82,11 +112,20 @@ COL_MAP = {
     "Expected Value Empate (ev_empate)":                                "ev_empate",
     "Expected Value Visitante (ev_visitante)":                          "ev_visit",
     "Es Value Bet (ev > 0)":                                            "value_bet",
+    "Goleadores Local (goleadores_local)":                              "goleadores_local",
+    "Goleadores Visitante (goleadores_visita)":                         "goleadores_visita",
+    "Corners Local Predichos (corners_h_pred)":                         "corners_local",
+    "Corners Visitante Predichos (corners_a_pred)":                     "corners_visita",
+    "Corners Total Predichos (corners_total_pred)":                     "corners_total",
+    "Amarillas Local (amarillas_local)":                                "amarillas_local",
+    "Amarillas Visitante (amarillas_visita)":                           "amarillas_visita",
 }
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# HELPERS
+# ─────────────────────────────────────────────────────────────────────────────
 def _clean(v):
-    """Convierte NaN/inf a None para JSON serialization."""
     if v is None:
         return None
     try:
@@ -97,104 +136,112 @@ def _clean(v):
         return None
 
 
-def load_picks() -> list[dict]:
+def _load_csv() -> list[dict]:
     if not CSV_PATH.exists():
+        log.warning("CSV no encontrado: %s", CSV_PATH)
         return []
     try:
         df = pd.read_csv(CSV_PATH, encoding="utf-8-sig")
         df = df.rename(columns={k: v for k, v in COL_MAP.items() if k in df.columns})
-        records = []
-        for _, row in df.iterrows():
-            record = {k: _clean(v) for k, v in row.items()}
-            records.append(record)
+        records = [{k: _clean(v) for k, v in row.items()} for _, row in df.iterrows()]
+        log.debug("CSV cargado: %d picks", len(records))
         return records
-    except Exception as e:
-        print(f"Error cargando CSV: {e}")
+    except Exception as exc:
+        log.error("Error cargando CSV: %s", exc)
         return []
+
+
+def _best_ev(pick: dict) -> float:
+    pred    = pick.get("prediccion", "")
+    mapping = {"Local": "ev_local", "Visitante": "ev_visit", "Empate": "ev_empate"}
+    return pick.get(mapping.get(pred, ""), None) or -999.0
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# ENDPOINTS — deben definirse ANTES del mount de StaticFiles
+# ─────────────────────────────────────────────────────────────────────────────
+@app.get("/health")
+def health():
+    csv_ok   = CSV_PATH.exists()
+    react_ok = (REACT_DIST / "index.html").exists()
+    return {
+        "status":     "ok" if csv_ok else "degraded",
+        "csv":        str(CSV_PATH) if csv_ok else "missing",
+        "react_dist": str(REACT_DIST) if react_ok else "missing — cd dashboard && npm run build",
+        "updated":    datetime.now(CDT).isoformat(),
+    }
 
 
 @app.get("/api/picks")
 def get_picks():
-    """Lista completa de predicciones Liga MX."""
-    picks = load_picks()
+    picks = _load_csv()
     return {"picks": picks, "total": len(picks)}
 
 
 @app.get("/api/summary")
 def get_summary():
-    """KPIs y estadísticas agregadas del modelo."""
-    picks = load_picks()
+    picks = _load_csv()
     if not picks:
-        return {"error": "Sin datos"}
+        raise HTTPException(status_code=503, detail="Sin datos — ejecutar predict_ligamx.py")
 
-    total      = len(picks)
-    alta       = sum(1 for p in picks if p.get("confianza") == "ALTA")
-    media      = sum(1 for p in picks if p.get("confianza") == "MEDIA")
-    baja       = sum(1 for p in picks if p.get("confianza") == "BAJA")
-    value_bets = sum(1 for p in picks if p.get("value_bet") is True)
+    confianza = {"ALTA": 0, "MEDIA": 0, "BAJA": 0}
+    pred_dist = {"Local": 0, "Empate": 0, "Visitante": 0}
+    pred_probs, evs = [], []
 
-    local_preds    = sum(1 for p in picks if p.get("prediccion") == "Local")
-    empate_preds   = sum(1 for p in picks if p.get("prediccion") == "Empate")
-    visita_preds   = sum(1 for p in picks if p.get("prediccion") == "Visitante")
-
-    # EV stats (sólo partidos con EV)
-    evs = []
     for p in picks:
+        conf = p.get("confianza", "BAJA")
+        confianza[conf] = confianza.get(conf, 0) + 1
         pred = p.get("prediccion", "")
-        if pred == "Local"     and p.get("ev_local")  is not None:
-            evs.append(p["ev_local"])
-        elif pred == "Visitante" and p.get("ev_visit") is not None:
-            evs.append(p["ev_visit"])
-        elif pred == "Empate"  and p.get("ev_empate") is not None:
-            evs.append(p["ev_empate"])
-    avg_ev = round(sum(evs) / len(evs), 4) if evs else None
+        pred_dist[pred] = pred_dist.get(pred, 0) + 1
+        prob_key = {"Local": "p_local", "Visitante": "p_visit", "Empate": "p_empate"}.get(pred)
+        if prob_key and (prob := p.get(prob_key)) is not None:
+            pred_probs.append(prob)
+        ev = _best_ev(p)
+        if ev > -999:
+            evs.append(ev)
 
-    # Avg probabilidad de la predicción ganadora
-    pred_probs = []
-    for p in picks:
-        pred = p.get("prediccion", "")
-        if pred == "Local":    pred_probs.append(p.get("p_local") or 0)
-        elif pred == "Visitante": pred_probs.append(p.get("p_visit") or 0)
-        elif pred == "Empate":    pred_probs.append(p.get("p_empate") or 0)
-    avg_prob = round(sum(pred_probs) / len(pred_probs), 1) if pred_probs else None
-
-    # Fechas
     fechas = sorted({p["fecha"] for p in picks if p.get("fecha")})
 
     return {
-        "total_picks":     total,
-        "alta":            alta,
-        "media":           media,
-        "baja":            baja,
-        "value_bets":      value_bets,
-        "local_preds":     local_preds,
-        "empate_preds":    empate_preds,
-        "visita_preds":    visita_preds,
-        "avg_ev":          avg_ev,
-        "avg_pred_prob":   avg_prob,
-        "fechas":          fechas,
-        "fecha_min":       fechas[0] if fechas else None,
-        "fecha_max":       fechas[-1] if fechas else None,
-        "has_odds":        any(p.get("momio_local") is not None for p in picks),
+        "total_picks":   len(picks),
+        **confianza,
+        "value_bets":    sum(1 for p in picks if p.get("value_bet") is True),
+        "local_preds":   pred_dist.get("Local", 0),
+        "empate_preds":  pred_dist.get("Empate", 0),
+        "visita_preds":  pred_dist.get("Visitante", 0),
+        "avg_ev":        round(sum(evs) / len(evs), 4) if evs else None,
+        "avg_pred_prob": round(sum(pred_probs) / len(pred_probs), 1) if pred_probs else None,
+        "has_odds":      any(p.get("momio_local") is not None for p in picks),
+        "fecha_min":     fechas[0] if fechas else None,
+        "fecha_max":     fechas[-1] if fechas else None,
+        "fechas":        fechas,
     }
 
 
 @app.get("/api/value-bets")
 def get_value_bets():
-    """Solo los picks con EV positivo (Value Bets)."""
-    picks = load_picks()
-    vb = [p for p in picks if p.get("value_bet") is True]
-    # Sort by best EV
-    def best_ev(p):
-        pred = p.get("prediccion", "")
-        if pred == "Local":      return p.get("ev_local") or -999
-        if pred == "Visitante":  return p.get("ev_visit") or -999
-        if pred == "Empate":     return p.get("ev_empate") or -999
-        return -999
-    vb.sort(key=best_ev, reverse=True)
+    picks = _load_csv()
+    vb = sorted(
+        [p for p in picks if p.get("value_bet") is True],
+        key=_best_ev,
+        reverse=True,
+    )
     return {"value_bets": vb, "total": len(vb)}
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# REACT DASHBOARD — montado DESPUÉS de todos los endpoints /api/*
+# StaticFiles con html=True sirve index.html para cualquier ruta no coincidente
+# ─────────────────────────────────────────────────────────────────────────────
+if REACT_DIST.exists():
+    app.mount("/", StaticFiles(directory=str(REACT_DIST), html=True), name="react")
+    log.info("React dashboard montado desde %s", REACT_DIST)
+else:
+    log.warning("dashboard/dist/ no encontrado — ejecutar: cd dashboard && npm run build")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run("api:app", host="0.0.0.0", port=8000, reload=True)
+    log.info("Iniciando servidor en http://0.0.0.0:8000")
+    uvicorn.run("api:app", host="0.0.0.0", port=8000, reload=False, workers=2)

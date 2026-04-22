@@ -8,12 +8,20 @@ Enriquece las predicciones con:
   5. Análisis situacional del partido (significado del encuentro)
 """
 from __future__ import annotations
+import sys
+from pathlib import Path as _Path
+_ROOT = _Path(__file__).resolve().parent.parent
+if str(_ROOT / "utils") not in sys.path:
+    sys.path.insert(0, str(_ROOT / "utils"))
+    sys.path.insert(0, str(_ROOT))
+
 import json
 import math
 import requests
 import functools
 import unicodedata
 from typing import Optional
+from utils.config import APIFOOTBALL_KEY, APIFOOTBALL_BASE, APIFOOTBALL_IDS  # noqa: E402
 
 # ──────────────────────────────────────────────────────────────
 # 1. CORRECCIÓN DIXON-COLES
@@ -195,13 +203,9 @@ def apply_motivation(lh: float, la: float,
 # ──────────────────────────────────────────────────────────────
 # 4. GOLEADORES TOP (API-Football)
 # ──────────────────────────────────────────────────────────────
-APIFOOTBALL_KEY  = "5cf3eb50762eeb4e9cf15173bae1cb65"
-APIFOOTBALL_BASE = "https://v3.football.api-sports.io"
 APIFOOTBALL_HDR  = {"x-apisports-key": APIFOOTBALL_KEY}
-
-# Liga MX = 262 | UCL = 2
-LEAGUE_IDS = {"ligamx": 262, "ucl": 2}
-LAST_AVAILABLE = {"ligamx": 2024, "ucl": 2024}
+LEAGUE_IDS       = APIFOOTBALL_IDS
+LAST_AVAILABLE   = {"ligamx": 2024, "ucl": 2024}
 
 # ─── ESPN Core API (gratuita, sin key) ────────────────────────────────────────
 # ESPN Core API: sports.core.api.espn.com — requiere resolver $ref por atleta/equipo
